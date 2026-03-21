@@ -1,0 +1,42 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant K8s as Kubernetes API Server
+    box rgba(100, 100, 255, 0.1) Control Plane
+        participant EG as Envoy Gateway Controller
+    end
+    box rgba(100, 255, 100, 0.1) Data Plane
+        participant Envoy as Envoy Proxy
+    end
+
+    note over EG, Envoy: Pre-condition: Long-lived gRPC xDS stream established
+
+    %% Step 1: User action
+    User->>K8s: kubectl apply (e.g., HTTPRoute)
+    activate K8s
+
+    %% Step 2: Reconciliation trigger
+    K8s-->>EG: Watch Event (Resource detected/modified)
+    deactivate K8s
+
+    %% Step 3: Internal processing loop
+    activate EG
+    rect rgb(245, 245, 245)
+        note right of EG: **Reconciliation Loop**
+        EG->>EG: 1. Read state of Gateway API resources & dependencies from K8s Cache
+        EG->>EG: 2. Translate K8s Resources into Intermediate Representation (Infra IR)
+        EG->>EG: 3. Generate final xDS Resources (Listeners, Clusters, Routes)
+        note right of EG: *Leveraging go-control-plane libraries*
+    end
+
+    %% Step 4: The push
+    EG->>Envoy: xDS Push (gRPC DiscoveryResponse containing new config)
+    deactivate EG
+
+    %% Step 5: Data plane update
+    activate Envoy
+    note left of Envoy: Proxy validates and dynamically hot-reloads config
+    Envoy-->>EG: xDS ACK (DiscoveryRequest with new config version hash)
+    deactivate Envoy
+
+    note over Envoy: Ready to handle traffic with new rules

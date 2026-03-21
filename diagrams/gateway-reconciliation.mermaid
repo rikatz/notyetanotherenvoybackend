@@ -1,0 +1,126 @@
+flowchart TD
+    Start([Controller Starts]) --> WatchResources[Watch GatewayClass, Gateway,<br/>Route Resources, and Policies]
+
+    WatchResources --> EventReceived{Event<br/>Received?}
+    EventReceived -->|GatewayClass| ProcessGC[Process GatewayClass]
+    EventReceived -->|Gateway| ProcessGW[Process Gateway]
+    EventReceived -->|Route| ProcessRoute[Process Route]
+    EventReceived -->|BackendTLSPolicy| ProcessBTP[Process BackendTLSPolicy]
+
+    %% GatewayClass Processing (Simplified - No Listeners Here!)
+    ProcessGC --> CheckController{Controller<br/>Name Matches?}
+    CheckController -->|No| IgnoreGC[Ignore Event]
+    CheckController -->|Yes| ValidateParams{Validate<br/>ParametersRef}
+    ValidateParams -->|Invalid| SetGCRejected[Set Accepted=False<br/>Reason: InvalidParameters]
+    ValidateParams -->|Valid| SetGCAccepted[Set Accepted=True<br/>Reason: Accepted]
+    ValidateParams -->|No Params| SetGCAccepted
+    SetGCRejected --> UpdateGCStatus[Update GatewayClass Status]
+    SetGCAccepted --> UpdateGCStatus
+    UpdateGCStatus --> WatchResources
+    IgnoreGC --> WatchResources
+
+    %% Gateway Processing (This is where Listeners are!)
+    ProcessGW --> CheckGWClass{GatewayClass<br/>Exists & Accepted?}
+    CheckGWClass -->|No| SetGWNotAccepted[Set Accepted=False<br/>Reason: InvalidGatewayClass]
+    CheckGWClass -->|Yes| ValidateListeners[Validate Listeners<br/>from Gateway.spec]
+
+    ValidateListeners --> CheckDistinct{All Listeners<br/>Distinct?}
+    CheckDistinct -->|No| MarkConflicted[Mark Conflicted Listeners<br/>Set Conflicted=True]
+    CheckDistinct -->|Yes| ValidateListener[Validate Each Listener]
+
+    MarkConflicted --> PartialAccept{Any Valid<br/>Listeners?}
+    PartialAccept -->|No| RejectGW[Reject Gateway<br/>Set Accepted=False]
+    PartialAccept -->|Yes| AcceptPartial[Accept Non-Conflicted<br/>Set ListenersNotValid]
+
+    ValidateListener --> CheckProtocol{Protocol<br/>Supported?}
+    CheckProtocol -->|No| SetUnsupported[Set Listener Accepted=False<br/>Reason: UnsupportedProtocol]
+    CheckProtocol -->|Yes| CheckTLS{TLS Config<br/>Valid?}
+
+    CheckTLS -->|Invalid| SetTLSInvalid[Set ResolvedRefs=False<br/>Reason: InvalidCertificateRef]
+    CheckTLS -->|Valid/None| SetListenerAccepted[Set Listener Accepted=True<br/>Per-Listener Status]
+    CheckTLS -->|No TLS| SetListenerAccepted
+
+    SetListenerAccepted --> ProvisionInfra[Provision Infrastructure<br/>Load Balancer, Proxy]
+    ProvisionInfra --> UpdateAddresses[Update Gateway.Status.Addresses]
+    UpdateAddresses --> SetProgrammed[Set Programmed=True<br/>Reason: Programmed]
+
+    SetGWNotAccepted --> WatchResources
+    RejectGW --> WatchResources
+    AcceptPartial --> ProvisionInfra
+    SetUnsupported --> UpdateGWStatus[Update Gateway Status]
+    SetTLSInvalid --> UpdateGWStatus
+    UpdateGWStatus --> WatchResources
+    SetProgrammed --> WatchResources
+
+    %% Route Processing (HTTPRoute, GRPCRoute, etc.)
+    ProcessRoute --> FindParents[Find Parent Gateways<br/>from ParentRefs]
+    FindParents --> CheckParent{Parent<br/>Gateway Exists?}
+    CheckParent -->|No| SetRouteNotAccepted[Set Accepted=False<br/>Reason: NoMatchingParent]
+
+    CheckParent -->|Yes| MatchListener[Match to Listener by<br/>Port/SectionName/Protocol]
+    MatchListener --> CheckAllowed{Route Allowed<br/>on Listener?}
+
+    CheckAllowed -->|Check Namespace| ValidateNS{Namespace<br/>Allowed?}
+    ValidateNS -->|No| SetNotAllowed[Set Accepted=False<br/>Reason: NotAllowedByListeners]
+    ValidateNS -->|Yes| ValidateKind{Kind<br/>Allowed?}
+
+    ValidateKind -->|No| SetNotAllowed
+    ValidateKind -->|Yes| CheckHostname{Hostname<br/>Intersects?}
+
+    CheckHostname -->|No| SetNoHostname[Set Accepted=False<br/>Reason: NoMatchingListenerHostname]
+    CheckHostname -->|Yes| ValidateRefs[Validate BackendRefs<br/>and Filters]
+
+    ValidateRefs --> CheckBackends{All Backends<br/>Resolvable?}
+    CheckBackends -->|No| SetRefsInvalid[Set ResolvedRefs=False<br/>Reason: BackendNotFound/RefNotPermitted]
+    CheckBackends -->|Yes| CheckBackendTLS{BackendTLSPolicy<br/>Exists?}
+
+    CheckBackendTLS -->|Yes| ApplyBackendTLS[Apply Backend TLS Config<br/>from BackendTLSPolicy]
+    CheckBackendTLS -->|No| SetRefsValid[Set ResolvedRefs=True]
+    ApplyBackendTLS --> SetRefsValid
+
+    SetRefsValid --> ValidateFilters{Filters<br/>Valid?}
+    ValidateFilters -->|Invalid| SetPartialInvalid[Set Accepted=True<br/>PartiallyInvalid=True]
+    ValidateFilters -->|Valid| SetRouteAccepted[Set Accepted=True<br/>Set Programmed=True]
+
+    SetRouteAccepted --> ConfigureDataPlane[Configure Data Plane<br/>Apply Routing Rules]
+    ConfigureDataPlane --> WatchResources
+
+    SetRouteNotAccepted --> WatchResources
+    SetNotAllowed --> WatchResources
+    SetNoHostname --> WatchResources
+    SetRefsInvalid --> ConfigureDataPlane
+    SetPartialInvalid --> ConfigureDataPlane
+
+    %% BackendTLSPolicy Processing
+    ProcessBTP --> FindTargets[Find Target Services<br/>from TargetRefs]
+    FindTargets --> CheckTargetExists{Target<br/>Service Exists?}
+    CheckTargetExists -->|No| SetBTPNotAccepted[Set Accepted=False<br/>Reason: InvalidTargetRef]
+
+    CheckTargetExists -->|Yes| CheckConflict{Other Policies<br/>Target Same Service?}
+    CheckConflict -->|Yes, Newer| SetBTPConflicted[Set Accepted=False<br/>Reason: Conflicted]
+    CheckConflict -->|No/Older| ValidateCACerts{Validate<br/>CACertificateRefs}
+
+    ValidateCACerts -->|Invalid| SetCAInvalid[Set ResolvedRefs=False<br/>Reason: InvalidCertificateRef]
+    ValidateCACerts -->|Valid| SetBTPAccepted[Set Accepted=True<br/>Set ResolvedRefs=True]
+
+    SetBTPAccepted --> UpdateBackendConfig[Update Backend TLS Config<br/>in Data Plane]
+    UpdateBackendConfig --> TriggerRouteReconcile[Trigger HTTPRoute<br/>Reconciliation]
+    TriggerRouteReconcile --> WatchResources
+
+    SetBTPNotAccepted --> WatchResources
+    SetBTPConflicted --> WatchResources
+    SetCAInvalid --> WatchResources
+
+    %% Styling
+    style Start fill:#e1f5e1
+    style WatchResources fill:#e3f2fd
+    style SetGCAccepted fill:#c8e6c9
+    style SetGCRejected fill:#ffcdd2
+    style SetProgrammed fill:#c8e6c9
+    style SetRouteAccepted fill:#c8e6c9
+    style SetBTPAccepted fill:#c8e6c9
+    style RejectGW fill:#ffcdd2
+    style ConfigureDataPlane fill:#fff9c4
+    style UpdateBackendConfig fill:#fff9c4
+    style ValidateListeners fill:#b3e5fc
+    style ApplyBackendTLS fill:#b3e5fc

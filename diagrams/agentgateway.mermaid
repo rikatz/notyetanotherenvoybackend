@@ -1,0 +1,46 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant K8s as Kubernetes API
+    box "Control Plane" #f9f9f9
+        participant CP as agentgateway
+    end
+    box "Data Plane (Rust)" #ececff
+        participant DP as agentgateway
+    end
+
+    %% Step 1: User applies resources
+    User->>K8s: 1. kubectl apply -f gateway-config.yaml<br/>(Gateway, HTTPRoute, Service)
+    activate K8s
+    K8s-->>CP: 2. Watch Event (New Config Detected)
+    deactivate K8s
+
+    activate CP
+    note right of CP: **Translation Engine**<br/>Separates "Where" from "What"
+
+    %% Parallel processing block
+    par **Path A: Network Discovery**
+        CP->>CP: Read Service & EndpointSlices
+        CP->>CP: **Convert to `istio.workload.Address`**
+        note right of CP: Flattens network complexity.<br/>Contains: IP, Port, SPIFFE Identity.
+    and **Path B: Routing Intent**
+        CP->>CP: Read Gateway & HTTPRoute
+        CP->>CP: **Convert to `agentgateway...Resource`**
+        note right of CP: Encapsulates high-level Policy & Routing.<br/>Contains: Match rules, Header modifications,<br/>Traffic splitting logic.
+    end
+
+    %% Step 3: Pushing the config
+    CP->>DP: 3. xDS Push (DiscoveryResponse)
+    note right of CP: Payload delivers:<br/>1. List of Workload Addresses<br/>2. List of Routing Resources
+    deactivate CP
+
+    %% Step 4: Data Plane handling
+    activate DP
+    DP->>DP: 4. Deserialize & Update State
+    
+    note left of DP: **Rust Logic:**
+    note left of DP: - Update internal Peer/IP map (from Address).
+    note left of DP: - Update Request Router configuration (from Resource).
+    
+    DP-->>CP: 5. xDS ACK (DiscoveryRequest + Version)
+    deactivate DP
