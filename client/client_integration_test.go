@@ -43,7 +43,9 @@ func (m *mockXDSServer) DeltaAggregatedResources(stream discovery.AggregatedDisc
 	md, ok := metadata.FromIncomingContext(stream.Context())
 	if ok {
 		if auth := md.Get("authorization"); len(auth) > 0 {
+			m.mu.Lock()
 			m.authToken = auth[0]
+			m.mu.Unlock()
 		}
 	}
 
@@ -96,6 +98,12 @@ func (m *mockXDSServer) getRequestCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.requests)
+}
+
+func (m *mockXDSServer) getAuthToken() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.authToken
 }
 
 func (m *mockXDSServer) getLastRequest() *discovery.DeltaDiscoveryRequest {
@@ -204,7 +212,7 @@ func TestADSClient_StartAndReceiveUpdates(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify handler was called
-	if !handler.updateCalled {
+	if !handler.wasUpdateCalled() {
 		t.Error("Expected Update handler to be called")
 	}
 
@@ -269,7 +277,7 @@ func TestADSClient_ReceiveRemovalUpdates(t *testing.T) {
 	// Wait for handler
 	time.Sleep(100 * time.Millisecond)
 
-	if !handler.removeCalled {
+	if !handler.wasRemoveCalled() {
 		t.Error("Expected Remove handler to be called")
 	}
 
@@ -344,10 +352,10 @@ func TestADSClient_MultipleResourceTypes(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Both handlers should be called
-	if !addressHandler.updateCalled {
+	if !addressHandler.wasUpdateCalled() {
 		t.Error("Expected Address handler to be called")
 	}
-	if !resourceHandler.updateCalled {
+	if !resourceHandler.wasUpdateCalled() {
 		t.Error("Expected Resource handler to be called")
 	}
 
@@ -445,8 +453,8 @@ func TestADSClient_Authentication(t *testing.T) {
 
 	// Verify auth token was sent
 	expectedAuth := "Bearer " + expectedToken
-	if mockServer.authToken != expectedAuth {
-		t.Errorf("Expected auth token '%s', got '%s'", expectedAuth, mockServer.authToken)
+	if mockServer.getAuthToken() != expectedAuth {
+		t.Errorf("Expected auth token '%s', got '%s'", expectedAuth, mockServer.getAuthToken())
 	}
 
 	cancel()
@@ -567,7 +575,7 @@ func TestADSClient_HandlerError(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Client should continue running despite handler error
-	if !handler.updateCalled {
+	if !handler.wasUpdateCalled() {
 		t.Error("Expected handler to be called despite error")
 	}
 
@@ -623,7 +631,7 @@ func TestADSClient_UnknownTypeURL(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Handler should NOT be called for unknown type
-	if handler.updateCalled {
+	if handler.wasUpdateCalled() {
 		t.Error("Handler should not be called for unknown TypeURL")
 	}
 

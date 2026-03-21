@@ -214,7 +214,7 @@ func TestDebug_MultipleMessages(t *testing.T) {
 	ctx := context.Background()
 
 	// Debug multiple messages
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		resource := &resourceapi.Resource{}
 		debug(ctx, resource)
 	}

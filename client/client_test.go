@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -9,6 +10,7 @@ import (
 
 // Mock handler for testing
 type mockHandler struct {
+	mu           sync.RWMutex
 	updateCalled bool
 	removeCalled bool
 	updateError  error
@@ -16,13 +18,29 @@ type mockHandler struct {
 }
 
 func (m *mockHandler) Update(ctx context.Context, resources []*discovery.Resource) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.updateCalled = true
 	return m.updateError
 }
 
 func (m *mockHandler) Remove(ctx context.Context, resourceNames []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.removeCalled = true
 	return m.removeError
+}
+
+func (m *mockHandler) wasUpdateCalled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.updateCalled
+}
+
+func (m *mockHandler) wasRemoveCalled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.removeCalled
 }
 
 func TestNewADSClient_ValidConfig(t *testing.T) {

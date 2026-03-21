@@ -119,7 +119,7 @@ func TestResourceStore_Update_MultipleResources(t *testing.T) {
 
 	// Create multiple resources
 	resources := make([]*discovery.Resource, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		res := &resourceapi.Resource{}
 		anyRes, _ := anypb.New(res)
 		resources[i] = &discovery.Resource{
@@ -352,7 +352,7 @@ func TestResourceStore_ConcurrentAccess(t *testing.T) {
 	done := make(chan bool, 10)
 
 	// Start multiple writers
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		go func(id int) {
 			resource := &resourceapi.Resource{}
 			anyRes, _ := anypb.New(resource)
@@ -363,7 +363,7 @@ func TestResourceStore_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Start multiple readers
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		go func() {
 			store.content.Load("resource")
 			done <- true
@@ -371,7 +371,7 @@ func TestResourceStore_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 

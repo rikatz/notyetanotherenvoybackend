@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -925,10 +926,8 @@ func (r *ResourceStore) addToReverseMap(m map[string][]string, key, value string
 	}
 
 	// Avoid duplicates
-	for _, v := range m[key] {
-		if v == value {
-			return
-		}
+	if slices.Contains(m[key], value) {
+		return
 	}
 
 	m[key] = append(m[key], value)
