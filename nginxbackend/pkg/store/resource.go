@@ -432,6 +432,12 @@ func (r *ResourceStore) generateServerFile(serverFileKey string) error {
 		}
 	}
 
+	// Sort routes by match specificity (most specific first)
+	// This ensures that exact matches take precedence over prefix matches over regex
+	slices.SortFunc(routeKeys, func(a, b string) int {
+		return r.compareRouteSpecificity(r.routes[a], r.routes[b])
+	})
+
 	// Store server file config
 	r.serverFiles[serverFileKey] = &ServerFileConfig{
 		ListenerKey: listenerKey,
@@ -603,6 +609,33 @@ func (r *ResourceStore) generateLocationDirectives(route *resourceapi.Route, mat
 		directives = append(directives, r.generateMatchDirectives(match)...)
 	}
 
+	// Process traffic policies for filters (redirects, rewrites, headers)
+	var requestHeaderMod *resourceapi.HeaderModifier
+	var responseHeaderMod *resourceapi.HeaderModifier
+	var requestRedirect *resourceapi.RequestRedirect
+	var urlRewrite *resourceapi.UrlRewrite
+
+	for _, policy := range route.TrafficPolicies {
+		if reqHdr := policy.GetRequestHeaderModifier(); reqHdr != nil {
+			requestHeaderMod = reqHdr
+		}
+		if respHdr := policy.GetResponseHeaderModifier(); respHdr != nil {
+			responseHeaderMod = respHdr
+		}
+		if redirect := policy.GetRequestRedirect(); redirect != nil {
+			requestRedirect = redirect
+		}
+		if rewrite := policy.GetUrlRewrite(); rewrite != nil {
+			urlRewrite = rewrite
+		}
+	}
+
+	// Handle redirects first (they don't proxy to backends)
+	if requestRedirect != nil {
+		directives = append(directives, r.generateRedirectDirectives(requestRedirect)...)
+		return directives
+	}
+
 	// Handle backends
 	if len(route.Backends) == 0 {
 		// No backends, return 404
@@ -662,6 +695,21 @@ func (r *ResourceStore) generateLocationDirectives(route *resourceapi.Route, mat
 		return directives
 	}
 
+	// Apply URL rewrite if specified
+	if urlRewrite != nil {
+		directives = append(directives, r.generateURLRewriteDirectives(urlRewrite)...)
+	}
+
+	// Apply request header modifications
+	if requestHeaderMod != nil {
+		directives = append(directives, r.generateRequestHeaderDirectives(requestHeaderMod)...)
+	}
+
+	// Apply response header modifications
+	if responseHeaderMod != nil {
+		directives = append(directives, r.generateResponseHeaderDirectives(responseHeaderMod)...)
+	}
+
 	// Single backend: simple proxy_pass
 	if len(validBackends) == 1 {
 		directives = append(directives, &crossplane.Directive{
@@ -673,12 +721,14 @@ func (r *ResourceStore) generateLocationDirectives(route *resourceapi.Route, mat
 		directives = append(directives, r.generateWeightedBackendDirectives(validBackends, totalWeight)...)
 	}
 
-	// Add standard proxy headers
-	directives = append(directives,
-		&crossplane.Directive{
+	// Add standard proxy headers (only if not already modified)
+	if requestHeaderMod == nil || !hasHeaderModification(requestHeaderMod, "Host") {
+		directives = append(directives, &crossplane.Directive{
 			Directive: "proxy_set_header",
 			Args:      []string{"Host", "$host"},
-		},
+		})
+	}
+	directives = append(directives,
 		&crossplane.Directive{
 			Directive: "proxy_set_header",
 			Args:      []string{"X-Real-IP", "$remote_addr"},
@@ -690,6 +740,197 @@ func (r *ResourceStore) generateLocationDirectives(route *resourceapi.Route, mat
 	)
 
 	return directives
+}
+
+// generateRedirectDirectives creates NGINX return directive for HTTP redirects
+func (r *ResourceStore) generateRedirectDirectives(redirect *resourceapi.RequestRedirect) crossplane.Directives {
+	var directives crossplane.Directives
+
+	// Build redirect URL
+	scheme := redirect.Scheme
+	if scheme == "" {
+		scheme = "$scheme" // Keep original scheme
+	}
+
+	host := redirect.Host
+	if host == "" {
+		host = "$host" // Keep original host
+	}
+
+	port := ""
+	if redirect.Port > 0 && redirect.Port != 80 && redirect.Port != 443 {
+		port = fmt.Sprintf(":%d", redirect.Port)
+	}
+
+	path := "$request_uri" // Default: keep original path
+	if redirect.GetFull() != "" {
+		path = redirect.GetFull()
+	} else if redirect.GetPrefix() != "" {
+		// Prefix replacement: replace matched prefix with new prefix
+		path = fmt.Sprintf("%s$request_uri", redirect.GetPrefix())
+	}
+
+	redirectURL := fmt.Sprintf("%s://%s%s%s", scheme, host, port, path)
+
+	// Default status code is 302
+	statusCode := redirect.Status
+	if statusCode == 0 {
+		statusCode = 302
+	}
+
+	directives = append(directives, &crossplane.Directive{
+		Directive: "return",
+		Args:      []string{fmt.Sprintf("%d", statusCode), redirectURL},
+	})
+
+	return directives
+}
+
+// generateURLRewriteDirectives creates NGINX rewrite directives for URL rewriting
+func (r *ResourceStore) generateURLRewriteDirectives(urlRewrite *resourceapi.UrlRewrite) crossplane.Directives {
+	var directives crossplane.Directives
+
+	// Host rewrite (set Host header)
+	if urlRewrite.Host != "" {
+		directives = append(directives, &crossplane.Directive{
+			Directive: "proxy_set_header",
+			Args:      []string{"Host", urlRewrite.Host},
+		})
+	}
+
+	// Path rewrite
+	if urlRewrite.GetFull() != "" {
+		// Full path replacement
+		directives = append(directives, &crossplane.Directive{
+			Directive: "rewrite",
+			Args:      []string{"^.*$", urlRewrite.GetFull(), "break"},
+		})
+	} else if urlRewrite.GetPrefix() != "" {
+		// Prefix replacement: rewrite the matched prefix
+		// This assumes location is path prefix, we replace it
+		directives = append(directives, &crossplane.Directive{
+			Directive: "rewrite",
+			Args:      []string{"^(.*)$", urlRewrite.GetPrefix() + "$1", "break"},
+		})
+	}
+
+	return directives
+}
+
+// generateRequestHeaderDirectives creates directives for request header modifications
+func (r *ResourceStore) generateRequestHeaderDirectives(headerMod *resourceapi.HeaderModifier) crossplane.Directives {
+	var directives crossplane.Directives
+
+	// Remove headers first (by not passing them)
+	for _, name := range headerMod.Remove {
+		directives = append(directives, &crossplane.Directive{
+			Directive: "proxy_set_header",
+			Args:      []string{name, `""`},
+		})
+	}
+
+	// Set headers (overwrite)
+	for _, header := range headerMod.Set {
+		directives = append(directives, &crossplane.Directive{
+			Directive: "proxy_set_header",
+			Args:      []string{header.Name, header.Value},
+		})
+	}
+
+	// Add headers (append to existing)
+	for _, header := range headerMod.Add {
+		varName := fmt.Sprintf("$http_%s", strings.ReplaceAll(strings.ToLower(header.Name), "-", "_"))
+		tmpVar := fmt.Sprintf("$add_header_%s", strings.ReplaceAll(strings.ToLower(header.Name), "-", "_"))
+
+		// Set temp variable to new value by default
+		directives = append(directives, &crossplane.Directive{
+			Directive: "set",
+			Args:      []string{tmpVar, fmt.Sprintf(`"%s"`, header.Value)},
+		})
+
+		// If original header exists, append to it
+		directives = append(directives, &crossplane.Directive{
+			Directive: "if",
+			Args:      []string{fmt.Sprintf("(%s != \"\")", varName)},
+			Block: crossplane.Directives{
+				{
+					Directive: "set",
+					Args:      []string{tmpVar, fmt.Sprintf(`"%s,%s"`, varName, header.Value)},
+				},
+			},
+		})
+
+		// Set the final header value
+		directives = append(directives, &crossplane.Directive{
+			Directive: "proxy_set_header",
+			Args:      []string{header.Name, tmpVar},
+		})
+	}
+
+	return directives
+}
+
+// generateResponseHeaderDirectives creates directives for response header modifications
+func (r *ResourceStore) generateResponseHeaderDirectives(headerMod *resourceapi.HeaderModifier) crossplane.Directives {
+	var directives crossplane.Directives
+
+	// NGINX uses add_header and more_clear_headers (if ngx_headers_more is available)
+	// For simplicity, we'll use add_header with 'always' flag and hide_header for removal
+
+	// Remove headers
+	for _, name := range headerMod.Remove {
+		directives = append(directives, &crossplane.Directive{
+			Directive: "proxy_hide_header",
+			Args:      []string{name},
+		})
+	}
+
+	// Set headers (add_header always overwrites for same header name)
+	for _, header := range headerMod.Set {
+		directives = append(directives, &crossplane.Directive{
+			Directive: "add_header",
+			Args:      []string{header.Name, header.Value, "always"},
+		})
+	}
+
+	// Add headers (append) - NGINX add_header adds multiple values
+	for _, header := range headerMod.Add {
+		directives = append(directives, &crossplane.Directive{
+			Directive: "add_header",
+			Args:      []string{header.Name, header.Value, "always"},
+		})
+	}
+
+	return directives
+}
+
+// hasHeaderModification checks if a header is being modified
+func hasHeaderModification(headerMod *resourceapi.HeaderModifier, headerName string) bool {
+	if headerMod == nil {
+		return false
+	}
+
+	headerNameLower := strings.ToLower(headerName)
+
+	for _, h := range headerMod.Set {
+		if strings.ToLower(h.Name) == headerNameLower {
+			return true
+		}
+	}
+
+	for _, h := range headerMod.Add {
+		if strings.ToLower(h.Name) == headerNameLower {
+			return true
+		}
+	}
+
+	for _, name := range headerMod.Remove {
+		if strings.ToLower(name) == headerNameLower {
+			return true
+		}
+	}
+
+	return false
 }
 
 // generateMatchDirectives creates if directives for method/header/query matching
@@ -915,6 +1156,108 @@ func (r *ResourceStore) routeMatchesHostname(route *resourceapi.Route, hostname 
 	}
 
 	return false
+}
+
+// compareRouteSpecificity compares two routes for sorting by specificity
+// Returns -1 if route a is more specific than b, 1 if b is more specific, 0 if equal
+// Specificity order: Exact path > Prefix path (longer first) > Regex path
+func (r *ResourceStore) compareRouteSpecificity(a, b *resourceapi.Route) int {
+	// Get the most specific match from each route
+	aSpec := r.getRouteMatchSpecificity(a)
+	bSpec := r.getRouteMatchSpecificity(b)
+
+	// Compare by path match type first
+	if aSpec.matchType != bSpec.matchType {
+		return int(aSpec.matchType) - int(bSpec.matchType)
+	}
+
+	// If same match type, compare by path length (longer/more specific first)
+	if aSpec.pathLength != bSpec.pathLength {
+		return bSpec.pathLength - aSpec.pathLength
+	}
+
+	// If still equal, compare by number of match criteria (more specific first)
+	return bSpec.criteriaCount - aSpec.criteriaCount
+}
+
+type routeSpecificity struct {
+	matchType     pathMatchType
+	pathLength    int
+	criteriaCount int
+}
+
+type pathMatchType int
+
+const (
+	pathMatchExact  pathMatchType = 0 // Most specific
+	pathMatchPrefix pathMatchType = 1
+	pathMatchRegex  pathMatchType = 2 // Least specific
+	pathMatchNone   pathMatchType = 3 // No path match
+)
+
+// getRouteMatchSpecificity calculates the specificity of a route's most specific match
+func (r *ResourceStore) getRouteMatchSpecificity(route *resourceapi.Route) routeSpecificity {
+	if len(route.Matches) == 0 {
+		// No matches means match-all (least specific)
+		return routeSpecificity{
+			matchType:     pathMatchNone,
+			pathLength:    0,
+			criteriaCount: 0,
+		}
+	}
+
+	// Find the most specific match
+	mostSpecific := routeSpecificity{
+		matchType:     pathMatchNone,
+		pathLength:    0,
+		criteriaCount: 0,
+	}
+
+	for _, match := range route.Matches {
+		spec := routeSpecificity{}
+
+		// Determine path match type and length
+		if match.Path != nil {
+			switch match.Path.Kind.(type) {
+			case *resourceapi.PathMatch_Exact:
+				spec.matchType = pathMatchExact
+				spec.pathLength = len(match.Path.Kind.(*resourceapi.PathMatch_Exact).Exact)
+			case *resourceapi.PathMatch_PathPrefix:
+				spec.matchType = pathMatchPrefix
+				spec.pathLength = len(match.Path.Kind.(*resourceapi.PathMatch_PathPrefix).PathPrefix)
+			case *resourceapi.PathMatch_Regex:
+				spec.matchType = pathMatchRegex
+				spec.pathLength = len(match.Path.Kind.(*resourceapi.PathMatch_Regex).Regex)
+			}
+		} else {
+			spec.matchType = pathMatchNone
+		}
+
+		// Count additional match criteria
+		if match.Method != nil {
+			spec.criteriaCount++
+		}
+		spec.criteriaCount += len(match.Headers)
+		spec.criteriaCount += len(match.QueryParams)
+
+		// Keep the most specific match
+		if r.isMoreSpecific(spec, mostSpecific) {
+			mostSpecific = spec
+		}
+	}
+
+	return mostSpecific
+}
+
+// isMoreSpecific returns true if spec a is more specific than spec b
+func (r *ResourceStore) isMoreSpecific(a, b routeSpecificity) bool {
+	if a.matchType != b.matchType {
+		return a.matchType < b.matchType
+	}
+	if a.pathLength != b.pathLength {
+		return a.pathLength > b.pathLength
+	}
+	return a.criteriaCount > b.criteriaCount
 }
 
 // Helper functions

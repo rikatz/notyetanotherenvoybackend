@@ -1,0 +1,41 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-03-21T20:19:08-03:00"
+gatewayAPIChannel: UNDEFINED
+gatewayAPIVersion: UNDEFINED
+implementation:
+  contact:
+  - ""
+  organization: Ricardo
+  project: Ricardo
+  url: https://nothing.tld
+  version: 0.0.1
+kind: ConformanceReport
+mode: gateway
+profiles:
+- core:
+    failedTests:
+    - HTTPRouteExactPathMatching
+    - HTTPRouteHeaderMatching
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteInvalidBackendRefUnknownKind
+    - HTTPRouteInvalidCrossNamespaceBackendRef
+    - HTTPRouteInvalidNonExistentBackendRef
+    - HTTPRouteInvalidReferenceGrant
+    - HTTPRouteListenerHostnameMatching
+    - HTTPRouteMatching
+    - HTTPRouteMatchingAcrossRoutes
+    - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    - HTTPRoutePathMatchOrder
+    - HTTPRouteRedirectHostAndStatus
+    - HTTPRouteReferenceGrant
+    - HTTPRouteRequestHeaderModifier
+    - HTTPRouteServiceTypes
+    - HTTPRouteSimpleSameNamespace
+    - HTTPRouteWeight
+    result: failure
+    statistics:
+      Failed: 18
+      Passed: 15
+      Skipped: 0
+  name: GATEWAY-HTTP
+  summary: Core tests failed with 18 test failures.
