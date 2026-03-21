@@ -1,0 +1,12 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: nginx
+spec:
+  controllerName: agentgateway.dev/agentgateway
+  description: Specialized class for NGINX using agentgateway
+  parametersRef:
+    name: nginx-gateway
+    group: agentgateway.dev
+    kind: AgentgatewayParameters
+    namespace: agentgateway-system

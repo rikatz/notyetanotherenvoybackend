@@ -1,0 +1,25 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: nginx-gateway
+  namespace: agentgateway-system
+spec:
+  image:
+    registry: ${REGISTRY}
+    repository: ${REPOSITORY}
+    tag: ${TAG}
+  deployment:
+    spec:
+      template:
+        spec:
+          containers:
+          - args:
+            - -token-file
+            - /var/run/secrets/xds-tokens/xds-token
+            - -endpoint
+            - agentgateway.agentgateway-system.svc.cluster.local:9978
+            name: agentgateway
+            securityContext:
+              readOnlyRootFilesystem: false
+              runAsUser: 101
+
